@@ -174,7 +174,7 @@
                 android:divider="#4d4d4d"
                 android:dividerHeight="1dip"
                 android:longClickable="false"
-                tools:listitem="@layout/golist_item" />
+                tools:listitem="@layout/go_list_item" />
         </LinearLayout>
     </LinearLayout>
 </androidx.constraintlayout.widget.ConstraintLayout>

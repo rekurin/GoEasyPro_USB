@@ -1,7 +1,26 @@
 package com.sepp89117.goeasypro_android.gopro;
 
+
+
+
 import static com.sepp89117.goeasypro_android.MyApplication.getReadableFileSize;
 import static com.sepp89117.goeasypro_android.gopro.GoProProtocol.packetizeMessage;
+
+
+// Add this block to the top of GoProDevice.java
+import androidx.annotation.NonNull;
+
+import java.io.IOException;
+import java.util.function.Consumer;
+
+import okhttp3.Call;
+import okhttp3.Callback;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+
+
+
 
 import android.annotation.SuppressLint;
 import android.app.Application;
@@ -51,8 +70,17 @@ import java.util.Timer;
 import java.util.TimerTask;
 import java.util.zip.GZIPInputStream;
 
+
+
+
+
+
 @SuppressLint("MissingPermission")
 public class GoProDevice {
+
+    public int rssi;
+
+
     //region BT connection stats
     public static final int BT_NOT_CONNECTED = 0;
     public static final int BT_CONNECTING = 1;
@@ -267,6 +295,14 @@ public class GoProDevice {
     public LiveStreaming.NotifyLiveStreamStatus liveStreamStatus = new LiveStreaming.NotifyLiveStreamStatus();
     public NetworkManagement.EnumProvisioning provisioningState = NetworkManagement.EnumProvisioning.PROVISIONING_UNKNOWN;
 
+    // ++ USB Connection State Properties
+    private boolean isUsbConnected = false;
+    private String usbBaseUrl = "";
+    private final OkHttpClient httpClient;
+
+
+
+
     public GoProDevice(Context context, Application application, BluetoothDevice device) {
         _application = application;
         _context = context;
@@ -274,6 +310,10 @@ public class GoProDevice {
         bluetoothDevice = device;
         btMacAddress = bluetoothDevice.getAddress();
         btDeviceName = bluetoothDevice.getName();
+
+        // ++ Initialize a dedicated OkHttpClient for this device
+        this.httpClient = new OkHttpClient();
+
         sharedPreferences = _context.getSharedPreferences("GoProDevices", Context.MODE_PRIVATE);
         displayName = sharedPreferences.getString("display_name_" + btDeviceName, btDeviceName);
         modelName = res.getString(R.string.str_NC);
@@ -293,6 +333,126 @@ public class GoProDevice {
         presetCmds.put("timeLapse", new byte[]{0x06, 0x40, 0x04, 0x00, 0x02, 0x00, 0x01});
         presetCmds.put("nightLapse", new byte[]{0x06, 0x40, 0x04, 0x00, 0x02, 0x00, 0x02});
     }
+
+    // --- URL and Query Methods ---
+
+    /**
+     * ++
+     * Determines the base URL for HTTP commands based on the current connection type.
+     * @return The base URL (e.g., "http://172.2X.1YZ.51:8080" for USB or "http://10.5.5.9:8080" for WiFi).
+     */
+    private String getBaseUrl() {
+        if (isUsbConnected) {
+            return this.usbBaseUrl;
+        } else {
+            // Default to the standard WiFi AP IP address
+            return "http://10.5.5.9:8080";
+        }
+    }
+
+    /**
+     * ++
+     * Gets the full URL for the media list query.
+     * Replaces the old `getMediaList_query` public field.
+     */
+    public String getGetMediaListQuery() {
+        return getBaseUrl() + "/gopro/media/list";
+    }
+
+    /**
+     * ++
+     * Gets the full URL to start the preview stream.
+     * Replaces the old `startStream_query` public field.
+     */
+    public String getStartStreamQuery() {
+        return getBaseUrl() + "/gopro/camera/stream/start";
+    }
+
+    /**
+     * ++
+     * Gets the full URL to stop the preview stream.
+     * Replaces the old `stopStream_query` public field.
+     */
+    public String getStopStreamQuery() {
+        return getBaseUrl() + "/gopro/camera/stream/stop";
+    }
+
+
+    // --- USB Control Methods ---
+
+    /**
+     * ++
+     * Returns true if the device is connected and controlled via USB.
+     */
+    public boolean isUsbConnected() {
+        return this.isUsbConnected;
+    }
+
+    /**
+     * ++
+     * Switches the device communication to USB mode. This is the main entry point
+     * called from MainActivity after USB permission is granted.
+     *
+     * @param ipAddress The IP address constructed from the device's serial number.
+     * @param onSuccess A callback that runs when USB control is successfully enabled.
+     * @param onError   A callback that runs if enabling USB control fails.
+     */
+    public void switchToUsbMode(String ipAddress, Runnable onSuccess, Consumer<String> onError) {
+        this.usbBaseUrl = "http://" + ipAddress + ":8080";
+        Log.i("GoProDevice", "Attempting to switch " + displayName + " to USB mode with base URL: " + this.usbBaseUrl);
+        enableWiredUsbControl(onSuccess, onError);
+    }
+
+    /**
+     * ++
+     * Sends the command to the GoPro to enable HTTP control over the USB connection.
+     * This must be successful before any other commands can be sent via USB.
+     */
+    private void enableWiredUsbControl(Runnable onSuccess, Consumer<String> onError) {
+        String url = this.usbBaseUrl + "/gopro/camera/control/wired_usb?p=1";
+        Request request = new Request.Builder().url(url).build();
+
+        httpClient.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onFailure(@NonNull Call call, @NonNull IOException e) {
+                Log.e("GoProDevice", "Failed to enable wired USB control for " + displayName, e);
+                // Reset state on failure
+                isUsbConnected = false;
+                usbBaseUrl = "";
+                onError.accept(e.getMessage());
+            }
+
+            // Inside enableWiredUsbControl() -> onResponse()
+
+            @Override
+            public void onResponse(@NonNull Call call, @NonNull Response response) {
+                try { // The older, more compatible try...finally block
+                    if (response.isSuccessful()) {
+                        Log.i("GoProDevice", "Wired USB control enabled successfully for " + displayName);
+                        isUsbConnected = true;
+                        onSuccess.run();
+                    } else {
+                        Log.e("GoProDevice", "Failed to enable wired USB control. Code: " + response.code());
+                        isUsbConnected = false;
+                        usbBaseUrl = "";
+                        onError.accept("HTTP Error: " + response.code());
+                    }
+                } finally {
+                    // This ensures the response is always closed, which is what the
+                    // try-with-resources statement was doing automatically.
+                    response.close();
+                }
+            }
+        });
+    }
+
+
+
+
+
+
+
+
 
     private void saveNewDisplayName(String newName) {
         displayName = newName;
@@ -1277,6 +1437,14 @@ public class GoProDevice {
 
     public void disconnectGoProDevice() {
         disconnectGoProDevice(false);
+
+        // ++ Reset USB connection state
+        this.isUsbConnected = false;
+        this.usbBaseUrl = "";
+        Log.i("GoProDevice", "USB connection state reset for " + displayName);
+
+        // Fire any data change listeners
+        // onDataChanged.run();
     }
 
     public void disconnectGoProDeviceByUser() {
@@ -2105,6 +2273,11 @@ public class GoProDevice {
     }
 
     public void connectWifi(WifiConnectionChangedInterface _wifiConnectionChangedCallback) {
+        if (isUsbConnected) {
+            Log.w("GoProDevice", "Attempted to connect to WiFi while in USB mode. Ignoring.");
+            return;
+        }
+
         if (wifiApState != 1 && !isWifiConnected()) {
             wifiApOn();
             try {

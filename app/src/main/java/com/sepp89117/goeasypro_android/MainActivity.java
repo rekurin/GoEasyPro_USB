@@ -11,6 +11,16 @@ import static com.sepp89117.goeasypro_android.gopro.NetworkManagement.EnumScanEn
 
 import android.Manifest;
 import android.annotation.SuppressLint;
+
+
+//rrrr
+import android.app.PendingIntent;
+import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbManager;
+
+
+
+
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
@@ -91,6 +101,8 @@ import okhttp3.Request;
 import okhttp3.Response;
 
 
+
+
 @RequiresApi(api = Build.VERSION_CODES.S)
 @SuppressLint("MissingPermission")
 public class MainActivity extends AppCompatActivity {
@@ -106,6 +118,12 @@ public class MainActivity extends AppCompatActivity {
     private int lastCamClickedIndex = -1;
     private final Map<Integer, String> firmwareCatalog = new HashMap<>();
     private MyApplication myApplication;
+
+    // ++ USB-related properties
+    private UsbManager usbManager;
+    private static final String ACTION_USB_PERMISSION = "com.sepp89117.goeasypro_android.USB_PERMISSION";
+    // -- End USB-related properties
+
 
     private static final int BT_PERMISSIONS_CODE = 87;
     private static final int WIFI_PERMISSIONS_CODE = 41;
@@ -152,6 +170,33 @@ public class MainActivity extends AppCompatActivity {
             this.finish();
             return;
         }
+
+        // ++ USB Setup
+        // NOTE: Ensure AndroidManifest.xml has <uses-feature android:name="android.hardware.usb.host" />
+        // and an intent-filter for USB_DEVICE_ATTACHED for this activity.
+        usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
+        IntentFilter permissionFilter = new IntentFilter(ACTION_USB_PERMISSION);
+
+        // Change this line:
+        //registerReceiver(usbPermissionReceiver, permissionFilter);
+
+        // To this:
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(usbPermissionReceiver, permissionFilter, RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(usbPermissionReceiver, permissionFilter);
+        }
+
+
+        IntentFilter attachedFilter = new IntentFilter(UsbManager.ACTION_USB_DEVICE_ATTACHED);
+        registerReceiver(usbDeviceAttachedReceiver, attachedFilter);
+        // -- End USB Setup
+
+        // In MainActivity.java's onCreate()
+        IntentFilter detachedFilter = new IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED);
+        registerReceiver(usbDeviceDetachedReceiver, detachedFilter);
+
+
 
         myApplication.setBluetoothAdapter(bluetoothAdapter);
         myApplication.setGoProDevices(goProDevices);
@@ -215,6 +260,18 @@ public class MainActivity extends AppCompatActivity {
         myApplication.resetIsAppPaused();
         if (hasBtPermissions())
             bluetoothAdapter.startDiscovery();
+
+
+        // ++ Check if app was opened by USB device attachment
+        Intent intent = getIntent();
+        if (intent != null && UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(intent.getAction())) {
+            UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+            if (device != null) {
+                Log.d("MainActivity", "GoPro attached on resume, requesting permission.");
+                requestUsbPermission(device);
+            }
+        }
+        // -- End USB check
     }
 
     @Override
@@ -233,6 +290,16 @@ public class MainActivity extends AppCompatActivity {
         }
         try {
             unregisterReceiver(broadcastReceiver);
+
+            // ++ Unregister USB receivers
+            unregisterReceiver(usbPermissionReceiver);
+            unregisterReceiver(usbDeviceAttachedReceiver);
+            // -- End unregister
+
+            // In MainActivity.java's onDestroy()
+            unregisterReceiver(usbDeviceDetachedReceiver);
+
+
         } catch (Exception ignored) {
 
         }
@@ -715,6 +782,16 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startPreview(GoProDevice goProDevice) {
+
+        // ++ USB Connection Check
+        // Assumes a method `isUsbConnected()` is added to GoProDevice class
+        if (goProDevice.isUsbConnected()) {
+            startPreviewUsb(goProDevice);
+            return;
+        }
+        // -- End USB Check
+
+
         WifiManager wifi2 = (WifiManager) getSystemService(Context.WIFI_SERVICE);
         if (wifi2 != null && !wifi2.isWifiEnabled()) {
             if (!wifi2.setWifiEnabled(true)) {
@@ -787,6 +864,16 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void browseStorage(GoProDevice goProDevice) {
+
+        // ++ USB Connection Check
+        // Assumes a method `isUsbConnected()` is added to GoProDevice class
+        if (goProDevice.isUsbConnected()) {
+            browseStorageUsb(goProDevice);
+            return;
+        }
+        // -- End USB Check
+
+
         WifiManager wifi = (WifiManager) getSystemService(Context.WIFI_SERVICE);
         if (wifi != null && !wifi.isWifiEnabled()) {
             if (!wifi.setWifiEnabled(true)) {
@@ -862,6 +949,281 @@ public class MainActivity extends AppCompatActivity {
             }
         }
     }
+
+
+
+
+    // In MainActivity.java
+
+    private final BroadcastReceiver usbDeviceDetachedReceiver = new BroadcastReceiver() {
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
+                UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                if (device != null && device.getVendorId() == 9842) { // GoPro Vendor ID
+                    Log.d("MainActivity", "GoPro detached.");
+                    String serial = device.getSerialNumber();
+                    if (serial != null) {
+                        GoProDevice goProDevice = goProDevices.stream()
+                                .filter(d -> serial.equals(d.serialNumber))
+                                .findFirst()
+                                .orElse(null);
+
+                        if (goProDevice != null && goProDevice.isUsbConnected()) {
+                            // Reset the device's connection state
+                            goProDevice.disconnectGoProDevice(); // This now also resets USB state
+                            runOnUiThread(() -> {
+                                Toast.makeText(MainActivity.this, goProDevice.displayName + " disconnected from USB.", Toast.LENGTH_SHORT).show();
+                                goListAdapter.notifyDataSetChanged(); // Update the UI
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+
+
+
+
+    // ++ Add new USB related methods below this line ++
+
+
+
+
+
+
+
+    /**
+     * Handles starting the preview stream over a USB connection.
+     * Skips all WiFi and GPS checks.
+     * @param goProDevice The target device, already connected via USB.
+     */
+    private void startPreviewUsb(GoProDevice goProDevice) {
+        if (goProDevice.isBusy) {
+            runOnUiThread(() -> Toast.makeText(getApplicationContext(), getResources().getString(R.string.str_cam_busy), Toast.LENGTH_SHORT).show());
+            goProDevice.queryAllStatusValues();
+            return;
+        }
+
+        final AlertDialog alert = new AlertDialog.Builder(MainActivity.this)
+                .setTitle("Starting USB Preview...")
+                .setMessage("Requesting preview stream from " + goProDevice.displayName)
+                .setCancelable(true) // Allow user to cancel
+                .create();
+        alert.show();
+
+        // Assumes `goProDevice.startStream_query` provides the correct URL for USB mode.
+        Request request = new Request.Builder().url(goProDevice.startStream_query).build();
+
+        httpClient.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onFailure(@NonNull Call call, @NonNull IOException e) {
+                Log.e("HTTP GET error (USB Preview)", e.toString());
+                runOnUiThread(() -> Toast.makeText(MainActivity.this, "USB Preview Request Failed: " + e.getMessage(), Toast.LENGTH_SHORT).show());
+                alert.dismiss();
+            }
+
+            @Override
+            public void onResponse(@NonNull Call call, @NonNull Response response) {
+                if (response.isSuccessful()) {
+                    runOnUiThread(() -> {
+                        // The standard URL for the USB preview stream is UDP on localhost
+                        // --- THE FIX IS HERE ---
+                        // REMOVE this line: myApplication.setPreviewStreamUrl("udp://127.0.0.1:8554");
+                        // ADD this line to set the device, which is the app's existing pattern:
+                        myApplication.setFocusedDevice(goProDevice);
+
+
+
+                        Intent previewActivityIntent = new Intent(MainActivity.this, PreviewActivity.class);
+                        startActivity(previewActivityIntent);
+                    });
+                } else {
+                    runOnUiThread(() -> Toast.makeText(getApplicationContext(), "Error starting USB preview! HTTP code: " + response.code(), Toast.LENGTH_SHORT).show());
+                    Log.e("HTTP GET (USB Preview)", "Not successful. Status code: " + response.code());
+                }
+                alert.dismiss();
+                response.close();
+            }
+        });
+    }
+
+    /**
+     * Handles browsing the media list over a USB connection.
+     * @param goProDevice The target device, already connected via USB.
+     */
+    private void browseStorageUsb(GoProDevice goProDevice) {
+        if (goProDevice.isBusy) {
+            runOnUiThread(() -> Toast.makeText(getApplicationContext(), getResources().getString(R.string.str_cam_busy), Toast.LENGTH_SHORT).show());
+            goProDevice.queryAllStatusValues();
+            return;
+        }
+
+        final AlertDialog alert = new AlertDialog.Builder(MainActivity.this)
+                .setTitle("Browsing via USB...")
+                .setMessage("Fetching media list from " + goProDevice.displayName)
+                .setCancelable(false)
+                .create();
+        alert.show();
+
+        // Assumes `goProDevice.getMediaList_query` provides the correct URL for USB mode.
+        Request request = new Request.Builder().url(goProDevice.getMediaList_query).build();
+
+        httpClient.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onFailure(@NonNull Call call, @NonNull IOException e) {
+                Log.e("HTTP GET error (USB)", e.toString());
+                runOnUiThread(() -> Toast.makeText(MainActivity.this, "USB Request Failed: " + e.getMessage(), Toast.LENGTH_SHORT).show());
+                alert.dismiss();
+            }
+
+            @Override
+            public void onResponse(@NonNull Call call, @NonNull Response response) {
+                if (response.isSuccessful()) {
+                    try {
+                        String resp_Str = response.body().string();
+                        JSONObject mainObject = new JSONObject(resp_Str);
+                        parseMediaList(mainObject, goProDevice);
+                    } catch (Exception ex) {
+                        Log.e("JSON (USB)", ex.toString());
+                    }
+                } else {
+                    runOnUiThread(() -> Toast.makeText(getApplicationContext(), "Error! HTTP status code: " + response.code(), Toast.LENGTH_SHORT).show());
+                    Log.e("HTTP GET (USB)", "Not successful. Status code: " + response.code());
+                }
+                alert.dismiss();
+                response.close();
+            }
+        });
+    }
+
+    /**
+     * Constructs the GoPro USB IP address from the camera's serial number.
+     * Per OpenGoPro docs, the IP is 172.2X.1YZ.51, where XYZ are the last three digits of the serial.
+     */
+    private String getUsbIpAddress(String serial) {
+        if (serial == null || serial.length() < 3) {
+            return null;
+        }
+        String lastThree = serial.substring(serial.length() - 3);
+        char x = lastThree.charAt(0);
+        char y = lastThree.charAt(1);
+        char z = lastThree.charAt(2);
+        return String.format(Locale.US, "172.2%c.1%c%c.51", x, y, z);
+    }
+
+    /**
+     * Initiates the process of setting up the USB connection for control.
+     * @param device The UsbDevice that was granted permission.
+     */
+    private void startUsbCommunication(UsbDevice device) {
+        String serial = device.getSerialNumber();
+        if (serial == null || serial.isEmpty()) {
+            Log.e("MainActivity", "Could not get serial number from USB device.");
+            Toast.makeText(this, "Could not identify GoPro from USB.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        GoProDevice goProDevice = goProDevices.stream()
+                .filter(d -> serial.equals(d.serialNumber))
+                .findFirst()
+                .orElse(null);
+
+        if (goProDevice == null) {
+            Log.e("MainActivity", "No paired GoPro device matches USB serial: " + serial);
+            Toast.makeText(this, "USB GoPro not in paired list.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        String ipAddress = getUsbIpAddress(serial);
+        if (ipAddress == null) {
+            Log.e("MainActivity", "Could not construct USB IP address from serial: " + serial);
+            return;
+        }
+
+        // IMPORTANT: Assumes you will add the `switchToUsbMode` method to your GoProDevice class.
+        // This method should store the IP, set a flag `isUsbConnected=true`, and send the
+        // command to enable wired USB control.
+        goProDevice.switchToUsbMode(ipAddress, () -> {
+            // onSuccess callback
+            runOnUiThread(() -> {
+                Toast.makeText(MainActivity.this, goProDevice.displayName + " ready for USB control.", Toast.LENGTH_LONG).show();
+                goListAdapter.notifyDataSetChanged(); // Update UI to show USB status
+            });
+        }, (error) -> {
+            // onError callback
+            runOnUiThread(() -> {
+                Toast.makeText(MainActivity.this, "Failed to enable USB control: " + error, Toast.LENGTH_LONG).show();
+            });
+        });
+    }
+
+    private void requestUsbPermission(UsbDevice device) {
+        // FLAG_IMMUTABLE is required for Android 12 (S) and higher.
+        PendingIntent permissionIntent = PendingIntent.getBroadcast(this, 0,
+                new Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE);
+        usbManager.requestPermission(device, permissionIntent);
+    }
+
+    /**
+     * Listens for the result of the USB permission request dialog.
+     */
+    private final BroadcastReceiver usbPermissionReceiver = new BroadcastReceiver() {
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            if (ACTION_USB_PERMISSION.equals(action)) {
+                synchronized (this) {
+                    UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                    if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                        if (device != null) {
+                            Log.i("MainActivity", "USB Permission GRANTED for GoPro.");
+                            Toast.makeText(context, "GoPro Connected via USB", Toast.LENGTH_SHORT).show();
+                            startUsbCommunication(device);
+                        }
+                    } else {
+                        Log.e("MainActivity", "USB Permission DENIED for GoPro.");
+                        Toast.makeText(context, "USB Permission Denied", Toast.LENGTH_SHORT).show();
+                    }
+                }
+            }
+        }
+    };
+
+    /**
+     * Listens for USB device attachments while the app is running.
+     */
+    private final BroadcastReceiver usbDeviceAttachedReceiver = new BroadcastReceiver() {
+        public void onReceive(Context context, Intent intent) {
+
+            String action = intent.getAction();
+            if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
+
+                UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+
+                if (device != null) {
+                    // GoPro Vendor ID is 9842 (0x2672)
+
+                    if (device.getVendorId() == 9842) {
+                        Toast.makeText(context, "fds7h9ds798hfsdh98sdf98h", Toast.LENGTH_SHORT).show();
+                        Log.d("MainActivity", "GoPro attached, requesting permission.");
+                        requestUsbPermission(device);
+                    }
+                }
+            }
+        }
+    };
+
+
+
+
+
+
+
+
+
+
 
     private void parseMediaList(JSONObject mediaList, GoProDevice goProDevice) {
         ArrayList<GoMediaFile> goMediaFiles = new ArrayList<>();
