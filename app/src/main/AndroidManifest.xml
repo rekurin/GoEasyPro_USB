@@ -2,6 +2,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+
+
+    <!-- Add this feature to declare USB Host capability -->
+    <uses-feature android:name="android.hardware.usb.host" />
+
+
+
+
+
     <uses-feature
         android:name="android.hardware.bluetooth"
         android:required="true" />
@@ -120,6 +129,19 @@
 
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+
+
+
+
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <!-- This meta-data points to a resource file that specifies the device to detect -->
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/device_filter" />
+
 
             <meta-data
                 android:name="android.app.lib_name"
