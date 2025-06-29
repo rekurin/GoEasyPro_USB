@@ -1,0 +1,9 @@
+<!-- File: app/src/main/res/xml/device_filter.xml -->
+<resources>
+    <!--
+        The vendor-id for GoPro is 2672 (0x2672).
+        The product-id can vary by camera model. You may need to look this up.
+        Example PIDs: 0x002A, 0x0034, 0x003B
+    -->
+    <usb-device vendor-id="0x2672" /> <!-- 9842 is 0x2672 in decimal -->
+</resources>
